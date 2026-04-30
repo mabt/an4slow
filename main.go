@@ -1309,7 +1309,18 @@ func correlate(entries []Entry, cms string, a analysis, queries []mysqlQuery) {
 				continue
 			}
 			marker := ""
-			if pv > 0 && mv > 0 {
+			// Only mark as correlated peak if both are significant
+			// (at least 10% of their respective max values)
+			phpMax, mysqlMax := 0, 0
+			for _, v := range phpHourly {
+				if v > phpMax { phpMax = v }
+			}
+			for _, v := range mysqlHourly {
+				if v > mysqlMax { mysqlMax = v }
+			}
+			phpThreshold := phpMax / 10
+			mysqlThreshold := mysqlMax / 10
+			if pv > phpThreshold && mv > mysqlThreshold {
 				marker = " ← pic simultane"
 			}
 			color := C.Reset
