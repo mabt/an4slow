@@ -833,7 +833,7 @@ func parseMysqlSlowlog(r io.Reader) []mysqlQuery {
 
 		if m := reMysqlTime.FindStringSubmatch(line); m != nil {
 			flush()
-			current = mysqlQuery{Timestamp: m[1]}
+			current = mysqlQuery{Timestamp: strings.TrimSpace(m[1])}
 			continue
 		}
 		if m := reMysqlUser.FindStringSubmatch(line); m != nil {
@@ -851,7 +851,8 @@ func parseMysqlSlowlog(r io.Reader) []mysqlQuery {
 		if strings.HasPrefix(line, "# ") || strings.HasPrefix(line, "/") {
 			continue
 		}
-		if strings.HasPrefix(line, "SET timestamp=") || strings.HasPrefix(line, "use ") {
+		if strings.HasPrefix(line, "SET timestamp=") || strings.HasPrefix(line, "use ") ||
+			strings.HasPrefix(line, "Time ") || strings.HasPrefix(line, "Tcp port:") {
 			continue
 		}
 		if line == "" {
@@ -968,16 +969,25 @@ func analyzeMysqlSlowlog(queries []mysqlQuery) mysqlAnalysis {
 }
 
 func extractMysqlHour(timestamp string) string {
-	// Formats: "2026-04-30T10:23:45.123456Z" or "260430 10:23:45"
+	// MySQL 8+: "2026-04-30T10:23:45.123456Z"
 	if strings.Contains(timestamp, "T") {
 		parts := strings.SplitN(timestamp, "T", 2)
 		if len(parts) == 2 && len(parts[1]) >= 2 {
 			return parts[1][:2] + "h"
 		}
 	}
+	// MariaDB/MySQL 5.x: "230208  5:00:25" or "230208 15:00:25"
 	parts := strings.Fields(timestamp)
-	if len(parts) >= 2 && len(parts[1]) >= 2 {
-		return parts[1][:2] + "h"
+	if len(parts) >= 2 {
+		timePart := parts[len(parts)-1] // last field is always the time
+		hParts := strings.SplitN(timePart, ":", 3)
+		if len(hParts) >= 1 {
+			h := hParts[0]
+			if len(h) == 1 {
+				h = "0" + h
+			}
+			return h + "h"
+		}
 	}
 	return ""
 }
@@ -1105,13 +1115,30 @@ func parsePhpTimestamp(ts string) time.Time {
 }
 
 func parseMysqlTimestamp(ts string) time.Time {
-	// "2026-04-30T10:23:45.123456Z"
+	ts = strings.TrimSpace(ts)
+	// MySQL 8+: "2026-04-30T10:23:45.123456Z"
 	for _, layout := range []string{
 		"2006-01-02T15:04:05.999999Z",
 		"2006-01-02T15:04:05Z",
-		"060102 15:04:05",
 	} {
 		t, err := time.Parse(layout, ts)
+		if err == nil {
+			return t
+		}
+	}
+	// MariaDB/MySQL 5.x: "230208  5:00:25" or "230208 15:00:25"
+	// Normalize multiple spaces
+	normalized := regexp.MustCompile(`\s+`).ReplaceAllString(ts, " ")
+	parts := strings.SplitN(normalized, " ", 2)
+	if len(parts) == 2 {
+		datePart := parts[0]
+		timePart := parts[1]
+		// Pad hour if needed: "5:00:25" -> "05:00:25"
+		if len(timePart) > 0 && timePart[0] != '0' && len(timePart) < 8 {
+			timePart = "0" + timePart
+		}
+		// Try 6-digit date (YYMMDD)
+		t, err := time.Parse("060102 15:04:05", datePart+" "+timePart)
 		if err == nil {
 			return t
 		}
