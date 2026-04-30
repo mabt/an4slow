@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -264,13 +265,16 @@ func classifyBottleneck(funcName, fpath string) string {
 	if strings.Contains(pl, "credis") || strings.Contains(pl, "redis") {
 		return "Redis I/O"
 	}
-	if strings.Contains(fl, "curl_exec") || strings.Contains(fl, "curl") {
+	if strings.Contains(fl, "curl_exec") || strings.Contains(fl, "curl_multi") || strings.Contains(fl, "curl") {
 		return "HTTP/cURL"
 	}
 	if strings.Contains(fl, "execute") && (strings.Contains(pl, "mysql") || strings.Contains(pl, "pdo") || strings.Contains(pl, "statement")) {
 		return "MySQL query"
 	}
-	if strings.Contains(fl, "fetchrow") || strings.Contains(fl, "fetchall") {
+	if strings.Contains(fl, "fetchrow") || strings.Contains(fl, "fetchall") || strings.Contains(fl, "fetchcol") || strings.Contains(fl, "fetchone") || strings.Contains(fl, "fetchpairs") {
+		return "MySQL query"
+	}
+	if strings.Contains(fl, "query") && (strings.Contains(pl, "mysql") || strings.Contains(pl, "pdo") || strings.Contains(pl, "db/")) {
 		return "MySQL query"
 	}
 	if strings.Contains(fl, "fgets") || strings.Contains(fl, "fwrite") || strings.Contains(fl, "stream_get_contents") {
@@ -279,20 +283,47 @@ func classifyBottleneck(funcName, fpath string) string {
 		}
 		return "File/Stream I/O"
 	}
-	if strings.Contains(fl, "gzuncompress") {
+	if strings.Contains(fl, "file_exists") || strings.Contains(fl, "is_readable") || strings.Contains(fl, "stat") || strings.Contains(fl, "file_get_contents") {
+		return "File/Stream I/O"
+	}
+	if strings.Contains(fl, "gzuncompress") || strings.Contains(fl, "gzdecode") || strings.Contains(fl, "gzinflate") {
 		return "Decompression"
 	}
-	if strings.Contains(fl, "parse") {
+	if strings.Contains(fl, "json_decode") || strings.Contains(fl, "json_encode") || strings.Contains(fl, "unserialize") || strings.Contains(fl, "serialize") {
 		return "Parsing"
 	}
-	if strings.Contains(fl, "quote") {
+	if strings.Contains(fl, "parse") || strings.Contains(fl, "simplexml") || strings.Contains(fl, "xpath") || strings.Contains(fl, "loadhtml") || strings.Contains(fl, "loadxml") {
+		return "Parsing"
+	}
+	if strings.Contains(fl, "preg_replace") || strings.Contains(fl, "preg_match") || strings.Contains(fl, "str_replace") {
+		return "Parsing"
+	}
+	if strings.Contains(fl, "quote") && (strings.Contains(pl, "mysql") || strings.Contains(pl, "db") || strings.Contains(pl, "zend")) {
 		return "MySQL query"
 	}
-	if strings.Contains(fl, "lcfirst") || strings.Contains(fl, "getblock") || strings.Contains(fl, "build") {
+	if strings.Contains(fl, "lcfirst") || strings.Contains(fl, "getblock") || strings.Contains(fl, "tohtml") || strings.Contains(fl, "render") {
+		return "Layout/Rendering"
+	}
+	if strings.Contains(fl, "build") && (strings.Contains(pl, "layout") || strings.Contains(pl, "block") || strings.Contains(pl, "render")) {
 		return "Layout/Rendering"
 	}
 	if strings.Contains(fl, "getbackend") || strings.Contains(fl, "getconnection") || strings.Contains(fl, "getsubject") {
 		return "Object init"
+	}
+	if strings.Contains(fl, "__construct") || strings.Contains(fl, "createobject") || strings.Contains(fl, "create(") {
+		return "Object init"
+	}
+	if strings.Contains(fl, "getresolvedargument") || strings.Contains(fl, "resolveargument") || strings.Contains(fl, "___callplugins") {
+		return "DI/Interception"
+	}
+	if strings.Contains(fl, "_loadscopeddata") || strings.Contains(fl, "getcurrentscope") || strings.Contains(fl, "getnext") {
+		return "DI/Interception"
+	}
+	if strings.Contains(pl, "interception") || strings.Contains(pl, "objectmanager") || strings.Contains(pl, "pluginlist") {
+		return "DI/Interception"
+	}
+	if strings.Contains(fl, "includefile") || strings.Contains(fl, "autoload") || strings.Contains(fl, "composer") {
+		return "Autoload"
 	}
 	return "Other"
 }
@@ -490,7 +521,10 @@ func mergeGenerated(a *analysis) {
 		}
 
 		if matched != "" {
-			a.ModuleHits.add(matched, a.ModuleHits[gm])
+			// Don't sum hits — they overlap (same entry counts for both generated and vendor)
+			if a.ModuleHits[gm] > a.ModuleHits[matched] {
+				a.ModuleHits[matched] = a.ModuleHits[gm]
+			}
 			delete(a.ModuleHits, gm)
 			for k, v := range a.ModuleFrames[gm] {
 				if a.ModuleFrames[matched] == nil {
@@ -573,7 +607,7 @@ func severityScore(mod string, a *analysis) int {
 
 // --- Report ---
 
-func printReport(entries []Entry, cms string, a analysis, topN_ int) {
+func printReport(entries []Entry, cms string, a analysis, topN_ int, sinceLabel string) {
 	total := len(entries)
 	fmt.Println()
 	fmt.Printf("%s%s%s\n", C.Bold, strings.Repeat("=", 70), C.Reset)
@@ -586,6 +620,9 @@ func printReport(entries []Entry, cms string, a analysis, topN_ int) {
 
 	if len(entries) > 0 && entries[0].Timestamp != "" && entries[len(entries)-1].Timestamp != "" {
 		fmt.Printf("%sPeriode :%s %s -> %s\n", C.Cyan, C.Reset, entries[0].Timestamp, entries[len(entries)-1].Timestamp)
+	}
+	if sinceLabel != "" && sinceLabel != "0" {
+		fmt.Printf("%sFiltre :%s derniers %s\n", C.Cyan, C.Reset, sinceLabel)
 	}
 
 	// Script distribution
@@ -1336,6 +1373,198 @@ func correlate(entries []Entry, cms string, a analysis, queries []mysqlQuery) {
 	fmt.Println()
 }
 
+// --- JSON output ---
+
+type jsonReport struct {
+	Timestamp   string               `json:"timestamp"`
+	Since       string               `json:"since,omitempty"`
+	PHP         *jsonPhpReport       `json:"php,omitempty"`
+	MySQL       *jsonMysqlReport     `json:"mysql,omitempty"`
+	Correlations *jsonCorrelations   `json:"correlations,omitempty"`
+}
+
+type jsonPhpReport struct {
+	CMS            string                   `json:"cms"`
+	TotalEntries   int                      `json:"total_entries"`
+	PeriodStart    string                   `json:"period_start"`
+	PeriodEnd      string                   `json:"period_end"`
+	Bottlenecks    map[string]int           `json:"bottlenecks"`
+	Hourly         map[string]int           `json:"hourly"`
+	Context        map[string]int           `json:"context"`
+	Infra          []jsonModuleHit          `json:"infra"`
+	BlockingHTTP   []jsonBlockingHTTP       `json:"blocking_http,omitempty"`
+	Modules        []jsonModule             `json:"modules"`
+}
+
+type jsonModuleHit struct {
+	Name  string `json:"name"`
+	Hits  int    `json:"hits"`
+	Pct   int    `json:"pct"`
+}
+
+type jsonBlockingHTTP struct {
+	Module   string `json:"module"`
+	Observer string `json:"observer"`
+	Count    int    `json:"count"`
+}
+
+type jsonModule struct {
+	Name       string         `json:"name"`
+	Score      int            `json:"score"`
+	Hits       int            `json:"hits"`
+	Pct        int            `json:"pct"`
+	RootCauses []jsonCause    `json:"root_causes"`
+	HotFrames  []jsonCause    `json:"hot_frames"`
+}
+
+type jsonCause struct {
+	Count int    `json:"count"`
+	Desc  string `json:"desc"`
+}
+
+type jsonMysqlReport struct {
+	TotalQueries int                    `json:"total_queries"`
+	TotalTime    float64                `json:"total_time_s"`
+	AvgTime      float64                `json:"avg_time_s"`
+	Hourly       map[string]int         `json:"hourly"`
+	Tables       map[string]int         `json:"tables"`
+	TopQueries   []jsonMysqlQuery       `json:"top_queries"`
+}
+
+type jsonMysqlQuery struct {
+	Count       int     `json:"count"`
+	TotalTime   float64 `json:"total_time_s"`
+	MaxTime     float64 `json:"max_time_s"`
+	AvgTime     float64 `json:"avg_time_s"`
+	AvgExamined int     `json:"avg_rows_examined"`
+	AvgSent     int     `json:"avg_rows_sent"`
+	Fingerprint string  `json:"fingerprint"`
+}
+
+type jsonCorrelations struct {
+	Modules []jsonCorrModule `json:"modules,omitempty"`
+	Hourly  []jsonCorrHour   `json:"hourly,omitempty"`
+}
+
+type jsonCorrModule struct {
+	Name      string         `json:"name"`
+	MySQLHits int            `json:"mysql_hits"`
+	TotalTime float64        `json:"total_time_s"`
+	Tables    map[string]int `json:"tables"`
+}
+
+type jsonCorrHour struct {
+	Hour  string `json:"hour"`
+	PHP   int    `json:"php"`
+	MySQL int    `json:"mysql"`
+}
+
+func buildJsonPhpReport(entries []Entry, cms string, a analysis, topN_ int) *jsonPhpReport {
+	total := len(entries)
+	r := &jsonPhpReport{
+		CMS:          cms,
+		TotalEntries: total,
+		Bottlenecks:  map[string]int{},
+		Hourly:       map[string]int{},
+		Context:      map[string]int{},
+	}
+
+	if len(entries) > 0 {
+		r.PeriodStart = entries[0].Timestamp
+		r.PeriodEnd = entries[len(entries)-1].Timestamp
+	}
+
+	for k, v := range a.BottleneckTypes { r.Bottlenecks[k] = v }
+	for k, v := range a.HourlyDistribution { r.Hourly[k] = v }
+	for k, v := range a.ScriptHits { r.Context[k] = v }
+
+	sorted := a.ModuleHits.sorted()
+	for _, item := range sorted {
+		if isInfraModule(item.Key) {
+			r.Infra = append(r.Infra, jsonModuleHit{item.Key, item.Value, item.Value * 100 / total})
+		}
+	}
+
+	for _, bh := range a.BlockingHTTP {
+		r.BlockingHTTP = append(r.BlockingHTTP, jsonBlockingHTTP{bh.Module, bh.Observer, bh.Count})
+	}
+
+	// Modules sorted by severity
+	var thirdParty []kv
+	for _, item := range sorted {
+		if !isInfraModule(item.Key) {
+			thirdParty = append(thirdParty, item)
+		}
+	}
+	sort.Slice(thirdParty, func(i, j int) bool {
+		return severityScore(thirdParty[i].Key, &a) > severityScore(thirdParty[j].Key, &a)
+	})
+	limit := topN_
+	if limit > len(thirdParty) { limit = len(thirdParty) }
+	for _, item := range thirdParty[:limit] {
+		m := jsonModule{
+			Name:  item.Key,
+			Score: severityScore(item.Key, &a),
+			Hits:  item.Value,
+			Pct:   item.Value * 100 / total,
+		}
+		if rc, ok := a.ModuleRootCauses[item.Key]; ok {
+			for _, c := range topN(rc.sorted(), 3) {
+				m.RootCauses = append(m.RootCauses, jsonCause{c.Value, c.Key})
+			}
+		}
+		if mf, ok := a.ModuleFrames[item.Key]; ok {
+			for _, f := range topN(mf.sorted(), 3) {
+				m.HotFrames = append(m.HotFrames, jsonCause{f.Value, f.Key})
+			}
+		}
+		r.Modules = append(r.Modules, m)
+	}
+
+	return r
+}
+
+func buildJsonMysqlReport(ma mysqlAnalysis, topN_ int) *jsonMysqlReport {
+	r := &jsonMysqlReport{
+		TotalQueries: ma.TotalQueries,
+		TotalTime:    ma.TotalTime,
+		Hourly:       map[string]int{},
+		Tables:       map[string]int{},
+	}
+	if ma.TotalQueries > 0 {
+		r.AvgTime = ma.TotalTime / float64(ma.TotalQueries)
+	}
+	for k, v := range ma.HourlyDistribution { r.Hourly[k] = v }
+	for k, v := range ma.Tables { r.Tables[k] = v }
+
+	type fpEntry struct {
+		fp    string
+		stats *mysqlFingerprintStats
+	}
+	var fpList []fpEntry
+	for fp, stats := range ma.ByFingerprint {
+		fpList = append(fpList, fpEntry{fp, stats})
+	}
+	sort.Slice(fpList, func(i, j int) bool {
+		return fpList[i].stats.TotalTime > fpList[j].stats.TotalTime
+	})
+	limit := topN_
+	if limit > len(fpList) { limit = len(fpList) }
+	for _, e := range fpList[:limit] {
+		s := e.stats
+		r.TopQueries = append(r.TopQueries, jsonMysqlQuery{
+			Count:       s.Count,
+			TotalTime:   s.TotalTime,
+			MaxTime:     s.MaxTime,
+			AvgTime:     s.TotalTime / float64(max(s.Count, 1)),
+			AvgExamined: s.TotalExamined / max(s.Count, 1),
+			AvgSent:     s.TotalRows / max(s.Count, 1),
+			Fingerprint: e.fp,
+		})
+	}
+	return r
+}
+
 // --- Time filter ---
 
 func parseSinceDuration(s string) time.Duration {
@@ -1394,6 +1623,7 @@ func main() {
 	mysqlLog := flag.String("mysql-log", "", "Chemin du MySQL slow log (defaut: /var/log/mysql/mysql-slow.log si le fichier existe)")
 	noMysql := flag.Bool("no-mysql", false, "Desactiver l'analyse MySQL slow log")
 	since := flag.String("since", "24h", "Ne garder que les logs des N dernieres heures (ex: 24h, 48h, 7d). 0 = pas de filtre")
+	jsonOut := flag.Bool("json", false, "Sortie au format JSON")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: an4slow [options] [logfile]\n\n")
 		fmt.Fprintf(os.Stderr, "Analyse les PHP-FPM slow logs et identifie les modules problematiques.\n")
@@ -1412,25 +1642,27 @@ func main() {
 		}
 	}
 
-	if *noColor {
+	if *jsonOut {
+		disableColors()
+	} else if *noColor {
 		disableColors()
 	}
 
-	var r io.Reader
 	args := flag.Args()
-	if len(args) == 0 || args[0] == "-" {
-		r = os.Stdin
+	var entries []Entry
+	if len(args) == 0 || (len(args) == 1 && args[0] == "-") {
+		entries = parseSlowlog(os.Stdin)
 	} else {
-		f, err := os.Open(args[0])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Erreur: %v\n", err)
-			os.Exit(1)
+		for _, path := range args {
+			f, err := os.Open(path)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Erreur: %v\n", err)
+				continue
+			}
+			entries = append(entries, parseSlowlog(f)...)
+			f.Close()
 		}
-		defer f.Close()
-		r = f
 	}
-
-	entries := parseSlowlog(r)
 	if len(entries) == 0 {
 		fmt.Fprintln(os.Stderr, "Aucune entry trouvee dans le slow log PHP-FPM.")
 		os.Exit(1)
@@ -1448,7 +1680,17 @@ func main() {
 
 	cms := detectCMS(entries)
 	a := analyze(entries, cms)
-	printReport(entries, cms, a, *top)
+
+	var jr jsonReport
+	if *jsonOut {
+		jr.Timestamp = time.Now().Format(time.RFC3339)
+		if *since != "0" && *since != "" {
+			jr.Since = *since
+		}
+		jr.PHP = buildJsonPhpReport(entries, cms, a, *top)
+	} else {
+		printReport(entries, cms, a, *top, *since)
+	}
 
 	// MySQL slow log analysis
 	if !*noMysql {
@@ -1457,7 +1699,7 @@ func main() {
 			defaultPath := "/var/log/mysql/mysql-slow.log"
 			if _, err := os.Stat(defaultPath); err == nil {
 				mysqlPath = defaultPath
-			} else {
+			} else if !*jsonOut {
 				fmt.Fprintf(os.Stderr, "\n%sMySQL slow log non trouve (%s). Utilisez --mysql-log /chemin/vers/slow.log pour le specifier.%s\n", C.Dim, defaultPath, C.Reset)
 			}
 		}
@@ -1473,12 +1715,22 @@ func main() {
 				}
 				if len(queries) > 0 {
 					ma := analyzeMysqlSlowlog(queries)
-					printMysqlReport(ma, *top)
-					correlate(entries, cms, a, queries)
-				} else {
+					if *jsonOut {
+						jr.MySQL = buildJsonMysqlReport(ma, *top)
+					} else {
+						printMysqlReport(ma, *top)
+						correlate(entries, cms, a, queries)
+					}
+				} else if !*jsonOut {
 					fmt.Fprintf(os.Stderr, "\n%sMySQL slow log:%s aucune requete trouvee dans %s\n", C.Yellow, C.Reset, mysqlPath)
 				}
 			}
 		}
+	}
+
+	if *jsonOut {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(jr)
 	}
 }
