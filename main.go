@@ -1336,6 +1336,56 @@ func correlate(entries []Entry, cms string, a analysis, queries []mysqlQuery) {
 	fmt.Println()
 }
 
+// --- Time filter ---
+
+func parseSinceDuration(s string) time.Duration {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" || s == "0" {
+		return 0
+	}
+	// Support "24h", "48h", "7d", "1d"
+	if strings.HasSuffix(s, "d") {
+		var n int
+		fmt.Sscanf(s, "%d", &n)
+		if n > 0 {
+			return time.Duration(n) * 24 * time.Hour
+		}
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 24 * time.Hour // default
+	}
+	return d
+}
+
+func filterPhpEntries(entries []Entry, since time.Time) []Entry {
+	if since.IsZero() {
+		return entries
+	}
+	var filtered []Entry
+	for i := range entries {
+		t := parsePhpTimestamp(entries[i].Timestamp)
+		if t.IsZero() || t.After(since) {
+			filtered = append(filtered, entries[i])
+		}
+	}
+	return filtered
+}
+
+func filterMysqlQueries(queries []mysqlQuery, since time.Time) []mysqlQuery {
+	if since.IsZero() {
+		return queries
+	}
+	var filtered []mysqlQuery
+	for i := range queries {
+		t := parseMysqlTimestamp(queries[i].Timestamp)
+		if t.IsZero() || t.After(since) {
+			filtered = append(filtered, queries[i])
+		}
+	}
+	return filtered
+}
+
 // --- Main ---
 
 func main() {
@@ -1343,6 +1393,7 @@ func main() {
 	top := flag.Int("top", 20, "Nombre de modules a afficher")
 	mysqlLog := flag.String("mysql-log", "", "Chemin du MySQL slow log (defaut: /var/log/mysql/mysql-slow.log si le fichier existe)")
 	noMysql := flag.Bool("no-mysql", false, "Desactiver l'analyse MySQL slow log")
+	since := flag.String("since", "24h", "Ne garder que les logs des N dernieres heures (ex: 24h, 48h, 7d). 0 = pas de filtre")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: an4slow [options] [logfile]\n\n")
 		fmt.Fprintf(os.Stderr, "Analyse les PHP-FPM slow logs et identifie les modules problematiques.\n")
@@ -1351,6 +1402,15 @@ func main() {
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+
+	// Parse --since duration
+	var sinceTime time.Time
+	if *since != "0" && *since != "" {
+		dur := parseSinceDuration(*since)
+		if dur > 0 {
+			sinceTime = time.Now().Add(-dur)
+		}
+	}
 
 	if *noColor {
 		disableColors()
@@ -1376,6 +1436,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Filter by time
+	if !sinceTime.IsZero() {
+		before := len(entries)
+		entries = filterPhpEntries(entries, sinceTime)
+		if len(entries) == 0 {
+			fmt.Fprintf(os.Stderr, "Aucune entry PHP-FPM dans les %s (sur %d au total).\n", *since, before)
+			os.Exit(1)
+		}
+	}
+
 	cms := detectCMS(entries)
 	a := analyze(entries, cms)
 	printReport(entries, cms, a, *top)
@@ -1398,6 +1468,9 @@ func main() {
 			} else {
 				defer f.Close()
 				queries := parseMysqlSlowlog(f)
+				if !sinceTime.IsZero() {
+					queries = filterMysqlQueries(queries, sinceTime)
+				}
 				if len(queries) > 0 {
 					ma := analyzeMysqlSlowlog(queries)
 					printMysqlReport(ma, *top)
