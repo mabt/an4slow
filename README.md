@@ -25,7 +25,7 @@ PHP-FPM and MySQL slow log analyzer. Identifies problematic third-party modules 
 ### Download binary (Linux x86_64)
 
 ```bash
-curl -sL https://github.com/mabt/an4slow/releases/latest/download/an4slow -o an4slow && chmod +x an4slow
+curl -sL https://github.com/mabt/an4slow/releases/latest/download/an4slow -o /usr/local/bin/an4slow && chmod +x /usr/local/bin/an4slow
 ```
 
 ### Build from source
