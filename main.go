@@ -888,8 +888,10 @@ func parseMysqlSlowlog(r io.Reader) []mysqlQuery {
 		if strings.HasPrefix(line, "# ") || strings.HasPrefix(line, "/") {
 			continue
 		}
-		if strings.HasPrefix(line, "SET timestamp=") || strings.HasPrefix(line, "use ") ||
-			strings.HasPrefix(line, "Time ") || strings.HasPrefix(line, "Tcp port:") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "SET timestamp=") || strings.HasPrefix(trimmed, "use ") ||
+			strings.HasPrefix(trimmed, "Time ") || strings.HasPrefix(trimmed, "Tcp port:") ||
+			strings.HasPrefix(trimmed, "Time\t") {
 			continue
 		}
 		if line == "" {
@@ -1355,8 +1357,8 @@ func correlate(entries []Entry, cms string, a analysis, queries []mysqlQuery) {
 			for _, v := range mysqlHourly {
 				if v > mysqlMax { mysqlMax = v }
 			}
-			phpThreshold := phpMax / 10
-			mysqlThreshold := mysqlMax / 10
+			phpThreshold := max(phpMax / 10, 5)
+			mysqlThreshold := max(mysqlMax / 10, 5)
 			if pv > phpThreshold && mv > mysqlThreshold {
 				marker = " ← pic simultane"
 			}
